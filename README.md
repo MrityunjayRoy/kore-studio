@@ -4,16 +4,20 @@ KORE is a vocal-karaoke mixing pipeline that runs noise reduction, vocal effects
 
 ## Installation
 
-Requires Python >= 3.11.
+Requires Python >= 3.11 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
+git clone https://github.com/MrityunjayRoy/kore && cd kore
+uv venv
 uv sync
 ```
+
+This installs the `kore` command into the virtual environment. Activate with `source .venv/bin/activate`.
 
 ## Usage
 
 ```bash
-python -m app.cli.kore <vocal> <karaoke> [options]
+kore <vocal> <karaoke> [options]
 ```
 
 ### Positional arguments
@@ -69,7 +73,7 @@ python -m app.cli.kore <vocal> <karaoke> [options]
 ## Example
 
 ```bash
-python -m app.cli.kore vocal.wav karaoke.mp3 -o mix.wav \
+kore vocal.wav karaoke.mp3 -o mix.wav \
   --highpass-cutoff 100 \
   --compressor-threshold -24 \
   --reverb-wet 0.25 \
@@ -87,7 +91,11 @@ python -m app.cli.kore vocal.wav karaoke.mp3 -o mix.wav \
 
 ## Standalone subcommands
 
-Each stage can be run independently:
+Run `kore --help` for a full list of options.
+
+## Standalone subcommands
+
+Each stage can be run independently (also available in PATH after install):
 
 ```bash
 python -m app.cli.noise-reducer <input> -o denoised.wav
