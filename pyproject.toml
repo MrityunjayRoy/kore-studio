@@ -12,10 +12,16 @@ dependencies = [
     "deepfilternet",
     "torch==2.6.0",
     "torchaudio==2.6.0",
+    "pyaudio>=0.2.14",
+    "rich>=13.7.0",
+    "inquirer>=3.2.0",
+    "psola>=0.0.1",
+    "numpy>=1.24.0",
 ]
 
 [project.scripts]
 kore = "app.cli.kore:main"
+kore-studio = "app.cli.studio:main"
 
 [build-system]
 requires = ["hatchling"]

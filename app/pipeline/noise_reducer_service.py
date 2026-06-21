@@ -27,12 +27,17 @@ class NoiseReducer:
         if needs_resample:
             audio = _resample(audio, orig_sr=sr, target_sr=self.model_sr)
 
-        audio_tensor = torch.from_numpy(audio)
+        if audio.ndim == 1:
+            audio_tensor = torch.from_numpy(audio).unsqueeze(0)
+        else:
+            audio_tensor = torch.from_numpy(audio)
 
         with torch.no_grad():
             enhanced = enhance(self.model, self.df_state, audio_tensor)
 
         enhanced_np = enhanced.cpu().numpy()
+        if enhanced_np.ndim == 2 and enhanced_np.shape[0] == 1:
+            enhanced_np = enhanced_np.squeeze(0)
 
         if needs_resample:
             enhanced_np = _resample(enhanced_np, orig_sr=self.model_sr, target_sr=sr, target_samples=n_samples)

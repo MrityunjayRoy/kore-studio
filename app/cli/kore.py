@@ -1,6 +1,7 @@
 import argparse
 import importlib.util
 import os
+import sys
 import tempfile
 
 _MODULES_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,6 +16,12 @@ def _load_module(path):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "studio":
+        from app.cli.studio import main as studio_main
+        sys.argv.pop(1)
+        studio_main()
+        return
+
     reducer = _load_module(os.path.join(_MODULES_DIR, "noise-reducer.py"))
     effects = _load_module(os.path.join(_MODULES_DIR, "vocal-effects.py"))
     mixer = _load_module(os.path.join(_MODULES_DIR, "mixer.py"))
@@ -57,6 +64,8 @@ def main():
                            help="Reverb stereo width 0-1 (default: 0.8)")
 
     mix_group = parser.add_argument_group("Mixer")
+    mix_group.add_argument("--vocal-balance", type=float, default=0.0,
+                           help="Vocal balance offset in dB (positive = louder vocal, default: 0)")
     mix_group.add_argument("--vocal-target", type=float, default=-9.0,
                            help="Target peak for vocals in dBFS (default: -9)")
     mix_group.add_argument("--karaoke-target", type=float, default=-13.0,
@@ -69,6 +78,18 @@ def main():
     parser.add_argument("--keep-denoised", help="Save intermediate denoised vocal to this path")
     parser.add_argument("--keep-processed", help="Save intermediate processed vocal to this path")
 
+    pitch_group = parser.add_argument_group("Pitch correction")
+    pitch_group.add_argument("--pitch-correct", action="store_true",
+                             help="Enable pitch correction")
+    pitch_group.add_argument("--pitch-key", default="C",
+                             help="Musical key for pitch correction (default: C)")
+    pitch_group.add_argument("--pitch-scale", default="chromatic",
+                             choices=["chromatic", "major", "minor",
+                                      "pentatonic_major", "pentatonic_minor"],
+                             help="Scale for pitch quantization (default: chromatic)")
+    pitch_group.add_argument("--pitch-strength", type=float, default=0.8,
+                             help="Pitch correction strength 0.0-1.0 (default: 0.8)")
+
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -76,6 +97,18 @@ def main():
         model, df_state, _ = reducer.init_df()
         audio, _ = reducer.load_audio(args.vocal, sr=df_state.sr())
         enhanced = reducer.enhance(model, df_state, audio)
+
+        if args.pitch_correct:
+            import soundfile as sf
+            from app.pipeline.pitch_correct import auto_pitch_correct
+            corrected = auto_pitch_correct(
+                enhanced, df_state.sr(),
+                key=args.pitch_key,
+                scale=args.pitch_scale,
+                strength=args.pitch_strength,
+            )
+            enhanced = corrected
+
         reducer.save_audio(denoised_path, enhanced, df_state.sr())
 
         processed_path = args.keep_processed or os.path.join(tmpdir, "processed.wav")
@@ -83,7 +116,7 @@ def main():
         effects.process(denoised_path, processed_path, chain, args.gain)
 
         mixer.mix(processed_path, args.karaoke, args.output,
-                  args.vocal_target, args.karaoke_target,
+                  args.vocal_target + args.vocal_balance, args.karaoke_target,
                   args.loudness_target, args.true_peak)
 
 
