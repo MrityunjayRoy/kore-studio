@@ -48,7 +48,7 @@ def _get_allowed_midi_notes(key: str, scale: str, min_midi: int = 36, max_midi: 
 def detect_pitch(audio: np.ndarray, sr: int, frame_length: int = 2048,
                  hop_length: int = 512) -> np.ndarray:
     if audio.ndim == 2:
-        audio = np.mean(audio, axis=1)
+        audio = audio.mean(axis=1)
 
     f0, voiced_flag, voiced_probs = librosa.pyin(
         audio,
@@ -86,7 +86,7 @@ def correct_pitch(audio: np.ndarray, sr: int, f0_orig: np.ndarray,
                   f0_target: np.ndarray, hop_length: int = 512,
                   strength: float = 1.0) -> np.ndarray:
     if audio.ndim == 2:
-        audio = np.mean(audio, axis=1)
+        audio = audio.mean(axis=1)
 
     blended_f0 = np.where(
         f0_target > 0,
