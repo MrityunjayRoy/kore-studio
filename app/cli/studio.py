@@ -1,10 +1,12 @@
 import os
 import sys
 import time
+import uuid
 import threading
 import select
 import tty
 import termios
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -127,6 +129,56 @@ DEFAULT_PARAMS = dict(PRESETS["Studio Clean"])
 
 WAVEFORM_CHARS = " ▁▂▃▄▅▆▇█"
 
+SESSIONS_DIR = "sessions"
+KARAOKES_DIR = "karaokes"
+AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".aiff", ".wma"}
+
+
+def new_session_id() -> str:
+    """Generate a sortable, unique session folder id."""
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    short = uuid.uuid4().hex[:8]
+    return f"{ts}-{short}"
+
+
+def list_karaoke_files() -> list:
+    """Return sorted paths of audio files in KARAOKES_DIR."""
+    if not os.path.isdir(KARAOKES_DIR):
+        return []
+    files = []
+    for name in sorted(os.listdir(KARAOKES_DIR)):
+        if os.path.splitext(name)[1].lower() in AUDIO_EXTS:
+            files.append(os.path.join(KARAOKES_DIR, name))
+    return files
+
+
+def select_karaoke() -> str:
+    """Pick a karaoke/instrumental from KARAOKES_DIR via list, with manual fallback."""
+    files = list_karaoke_files()
+
+    if files:
+        console.print(f"[dim]Found {len(files)} track(s) in {KARAOKES_DIR}/[/dim]")
+        choices = [(os.path.basename(p), p) for p in files]
+        choices.append(("Enter path manually...", None))
+        q = [inquirer.List("pick", message="Select karaoke/instrumental",
+                           choices=choices, default=choices[0])]
+        a = inquirer.prompt(q)
+        if a and a["pick"] is not None:
+            return a["pick"]
+        if not a:
+            sys.exit(0)
+
+    console.print(
+        f"[yellow]No tracks in {KARAOKES_DIR}/ — drop audio files there,[/yellow]\n"
+        f"[yellow]or enter a path manually below.[/yellow]"
+    )
+    q = [inquirer.Text("path", message="Path to karaoke/instrumental audio file",
+                       validate=lambda _, x: os.path.isfile(x) or "File not found")]
+    a = inquirer.prompt(q)
+    if not a:
+        sys.exit(0)
+    return a["path"]
+
 
 def vu_meter(audio_chunk: np.ndarray, width: int = 20) -> Text:
     if len(audio_chunk) == 0:
@@ -173,6 +225,8 @@ def select_devices():
     console.clear()
     console.print(Panel("[bold cyan]KORE Studio[/bold cyan]\nSelect audio devices", style="cyan"))
 
+    karaoke_path = select_karaoke()
+
     input_devs = list_input_devices()
     output_devs = list_output_devices()
 
@@ -209,11 +263,6 @@ def select_devices():
             choices=out_choices,
             default=out_choices[default_out_idx],
         ),
-        inquirer.Text(
-            "karaoke_path",
-            message="Path to karaoke/instrumental audio file",
-            validate=lambda _, x: os.path.isfile(x) or "File not found",
-        ),
         inquirer.List(
             "monitor_level",
             message="Live vocal monitoring level",
@@ -245,7 +294,7 @@ def select_devices():
     in_idx = in_choices.index(answers["input_dev"])
     out_idx = out_choices.index(answers["output_dev"])
 
-    return input_devs[in_idx], output_devs[out_idx], answers["karaoke_path"], float(answers["monitor_level"]), float(answers["input_gain"])
+    return input_devs[in_idx], output_devs[out_idx], karaoke_path, float(answers["monitor_level"]), float(answers["input_gain"])
 
 
 def pre_roll_screen(input_dev, output_dev, karaoke_path, monitor_level, input_gain, latency_ms=None):
@@ -490,25 +539,33 @@ def _apply_vocal_doubler(audio: np.ndarray, sr: int, delay_ms: float = 12.0,
     if delay_samples >= len(audio):
         return audio
 
-    stereo = np.zeros((len(audio), 2), dtype=np.float32)
-    stereo[:, 0] = audio
+    # Dry vocal centered equally on both channels → solid, balanced center image.
+    stereo = np.column_stack([audio, audio]).astype(np.float32)
 
-    right = np.zeros_like(audio)
-    right[delay_samples:] = audio[:-delay_samples] * 0.4
-    if delay_samples * 2 < len(audio):
-        right[delay_samples * 2:] += audio[:-delay_samples * 2] * feedback * 0.2
-    stereo[:, 1] = right
-
+    # Complementary Haas delay taps: equal gain, different times per side.
+    # Widens the image WITHOUT tilting the balance left or right.
     left_delay = int(delay_samples * 0.6)
-    left = audio.copy()
-    if left_delay < len(audio):
-        left[left_delay:] += audio[:-left_delay] * 0.25
-    stereo[:, 0] = left
+    right_delay = delay_samples
 
-    peak = np.max(np.abs(stereo))
-    if peak > 0:
-        target = np.max(np.abs(audio))
-        stereo *= target / peak
+    if left_delay < len(audio):
+        l_tap = np.zeros_like(audio)
+        l_tap[left_delay:] = audio[:-left_delay] * 0.25
+        stereo[:, 0] += l_tap
+
+    if right_delay < len(audio):
+        r_tap = np.zeros_like(audio)
+        r_tap[right_delay:] = audio[:-right_delay] * 0.25
+        stereo[:, 1] += r_tap
+
+    # Normalize each channel independently to the dry peak. Per-channel
+    # normalization guarantees equal L/R amplitude regardless of how the
+    # different delay times correlate with the signal — width still comes
+    # from the time offset (Haas), not amplitude.
+    target = np.max(np.abs(audio))
+    if target > 0:
+        ch_peak = np.max(np.abs(stereo), axis=0)
+        nz = ch_peak > 0
+        stereo[:, nz] *= target / ch_peak[nz]
 
     return stereo
 
@@ -663,7 +720,8 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
     return final
 
 
-def effects_menu(vocal: np.ndarray, sr: int, karaoke_path: Optional[str] = None) -> Optional[str]:
+def effects_menu(vocal: np.ndarray, sr: int, karaoke_path: Optional[str] = None,
+                 session_dir: Optional[str] = None) -> Optional[str]:
     params = dict(DEFAULT_PARAMS)
 
     while True:
@@ -711,7 +769,8 @@ def effects_menu(vocal: np.ndarray, sr: int, karaoke_path: Optional[str] = None)
         action = answer["action"]
 
         if action == "Apply & Export":
-            q = [inquirer.Text("path", message="Output path", default="kore_studio_output.wav")]
+            default_path = os.path.join(session_dir, "mixed.wav") if session_dir else "kore_studio_output.wav"
+            q = [inquirer.Text("path", message="Output path", default=default_path)]
             a = inquirer.prompt(q)
             if a:
                 apply_effects(vocal, sr, params, karaoke_path, a["path"])
@@ -941,6 +1000,8 @@ def post_record_menu(recorded: np.ndarray, sr: int, karaoke_path: Optional[str] 
 
 
 def main(args=None):
+    os.makedirs(KARAOKES_DIR, exist_ok=True)
+
     console.print(Panel(
         "[bold cyan]KORE Studio[/bold cyan]\n"
         "Record vocals over karaoke with studio-quality effects",
@@ -990,9 +1051,21 @@ def main(args=None):
             console.print(f"[bold red]⚠ {bleed['message']}[/bold red]")
             console.print(f"[dim]Correlation: {bleed['correlation']}[/dim]")
 
-        raw_path = "kore_raw_vocal.wav"
-        sf.write(raw_path, recorded, sr, subtype="PCM_24")
-        console.print(f"[dim]Raw vocal saved to {raw_path}[/dim]")
+        session_id = new_session_id()
+        session_dir = os.path.join(SESSIONS_DIR, session_id)
+        os.makedirs(session_dir, exist_ok=True)
+
+        vocal_path = os.path.join(session_dir, "vocal.wav")
+        sf.write(vocal_path, recorded, sr, subtype="PCM_24")
+
+        instrumental_path = os.path.join(session_dir, "instrumental.wav")
+        sf.write(instrumental_path, karaoke_audio, sr, subtype="PCM_24")
+
+        console.print(
+            f"[green]Session exported:[/green] {session_dir}/\n"
+            f"[dim]  vocal.wav         (unprocessed)[/dim]\n"
+            f"[dim]  instrumental.wav  (matching backing track)[/dim]"
+        )
 
         decision = post_record_menu(recorded, sr, karaoke_path, output_dev["id"])
 
@@ -1001,7 +1074,7 @@ def main(args=None):
         elif decision == "cancel":
             break
 
-        output = effects_menu(recorded, sr, karaoke_path)
+        output = effects_menu(recorded, sr, karaoke_path, session_dir)
         if output:
             console.print(f"\n[bold green]Done![/bold green] Output: {output}")
 
