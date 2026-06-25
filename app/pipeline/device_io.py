@@ -122,6 +122,41 @@ def remove_dc_offset(audio: np.ndarray) -> np.ndarray:
     return audio - np.mean(audio)
 
 
+def declick(audio: np.ndarray, threshold: float = 0.35,
+            kernel_size: int = 5) -> np.ndarray:
+    """Remove transient clicks/pops via median-filter interpolation.
+
+    Detects samples that deviate sharply from their local neighbourhood
+    (digital clicks, mouth pops, buffer glitches) and replaces only those
+    with a median-filtered value. Legitimate transients (consonant attacks)
+    are preserved because the threshold targets discrete spikes, not edges.
+    """
+    if len(audio) == 0:
+        return audio
+    from scipy.signal import medfilt
+
+    mono = audio if audio.ndim == 1 else np.mean(audio, axis=1)
+    mono = mono.astype(np.float32)
+
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    if len(mono) < kernel_size:
+        return audio
+
+    smoothed = medfilt(mono, kernel_size=kernel_size).astype(np.float32)
+    residual = np.abs(mono - smoothed)
+    click_mask = residual > threshold
+    if not np.any(click_mask):
+        return audio
+
+    out = mono.copy()
+    out[click_mask] = smoothed[click_mask]
+
+    if audio.ndim == 2:
+        return np.column_stack([out, out])
+    return out
+
+
 def soft_clip(audio: np.ndarray, threshold: float = 0.8) -> np.ndarray:
     out = audio.copy()
     mask = np.abs(out) > threshold
@@ -154,6 +189,7 @@ def clean_vocal(audio: np.ndarray, sample_rate: int = 48000,
     cleaned = audio.astype(np.float64) * input_gain
     cleaned = cleaned.astype(np.float32)
     cleaned = remove_dc_offset(cleaned)
+    cleaned = declick(cleaned)
 
     fade_samples = min(int(sample_rate * 0.020), len(cleaned))
     if fade_samples > 0:

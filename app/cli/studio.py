@@ -37,10 +37,15 @@ PRESETS = {
         "pitch_correct": True, "pitch_key": "C", "pitch_scale": "chromatic", "pitch_strength": 0.5,
         "highpass_cutoff": 80.0,
         "low_cut_db": -1.5, "low_cut_freq": 200.0,
+        "gate_enabled": True, "gate_threshold_db": -50.0,
+        "boxiness_db": -2.0, "boxiness_freq": 400.0,
+        "harshness_db": -2.0, "harshness_freq": 3500.0,
         "presence_boost": 5.0, "presence_freq": 3000.0,
         "air_boost": 4.0, "air_freq": 12000.0,
         "deesser_threshold": -20.0,
         "saturation_drive": 1.5,
+        "leveler_threshold": -24.0, "leveler_ratio": 2.0,
+        "leveler_attack": 10.0, "leveler_release": 150.0,
         "compressor_threshold": -18.0, "compressor_ratio": 3.0,
         "compressor_attack": 3.0, "compressor_release": 60.0,
         "reverb_room_size": 0.25, "reverb_damping": 0.5,
@@ -56,10 +61,15 @@ PRESETS = {
         "pitch_correct": True, "pitch_key": "C", "pitch_scale": "major", "pitch_strength": 0.7,
         "highpass_cutoff": 80.0,
         "low_cut_db": -1.0, "low_cut_freq": 200.0,
+        "gate_enabled": True, "gate_threshold_db": -48.0,
+        "boxiness_db": -2.0, "boxiness_freq": 350.0,
+        "harshness_db": -3.0, "harshness_freq": 3000.0,
         "presence_boost": 6.0, "presence_freq": 3000.0,
         "air_boost": 5.0, "air_freq": 12000.0,
         "deesser_threshold": -22.0,
         "saturation_drive": 2.0,
+        "leveler_threshold": -22.0, "leveler_ratio": 2.5,
+        "leveler_attack": 8.0, "leveler_release": 120.0,
         "compressor_threshold": -20.0, "compressor_ratio": 3.5,
         "compressor_attack": 1.5, "compressor_release": 40.0,
         "reverb_room_size": 0.28, "reverb_damping": 0.4,
@@ -74,10 +84,15 @@ PRESETS = {
         "pitch_correct": True, "pitch_key": "C", "pitch_scale": "major", "pitch_strength": 0.6,
         "highpass_cutoff": 80.0,
         "low_cut_db": -1.0, "low_cut_freq": 200.0,
+        "gate_enabled": True, "gate_threshold_db": -45.0,
+        "boxiness_db": -1.5, "boxiness_freq": 400.0,
+        "harshness_db": -1.5, "harshness_freq": 3500.0,
         "presence_boost": 4.0, "presence_freq": 3000.0,
         "air_boost": 3.5, "air_freq": 12000.0,
         "deesser_threshold": -18.0,
         "saturation_drive": 1.8,
+        "leveler_threshold": -20.0, "leveler_ratio": 2.5,
+        "leveler_attack": 8.0, "leveler_release": 100.0,
         "compressor_threshold": -22.0, "compressor_ratio": 4.0,
         "compressor_attack": 2.0, "compressor_release": 40.0,
         "reverb_room_size": 0.45, "reverb_damping": 0.3,
@@ -92,10 +107,15 @@ PRESETS = {
         "pitch_correct": False, "pitch_key": "C", "pitch_scale": "chromatic", "pitch_strength": 0.0,
         "highpass_cutoff": 80.0,
         "low_cut_db": -2.0, "low_cut_freq": 200.0,
+        "gate_enabled": True, "gate_threshold_db": -55.0,
+        "boxiness_db": -3.0, "boxiness_freq": 450.0,
+        "harshness_db": -2.0, "harshness_freq": 3500.0,
         "presence_boost": 3.5, "presence_freq": 3000.0,
         "air_boost": 2.0, "air_freq": 12000.0,
         "deesser_threshold": -22.0,
         "saturation_drive": 1.2,
+        "leveler_threshold": -26.0, "leveler_ratio": 2.0,
+        "leveler_attack": 12.0, "leveler_release": 200.0,
         "compressor_threshold": -16.0, "compressor_ratio": 4.0,
         "compressor_attack": 1.0, "compressor_release": 80.0,
         "reverb_room_size": 0.08, "reverb_damping": 0.8,
@@ -110,10 +130,15 @@ PRESETS = {
         "pitch_correct": False, "pitch_key": "C", "pitch_scale": "chromatic", "pitch_strength": 0.0,
         "highpass_cutoff": 20.0,
         "low_cut_db": 0.0, "low_cut_freq": 200.0,
+        "gate_enabled": False, "gate_threshold_db": -60.0,
+        "boxiness_db": 0.0, "boxiness_freq": 400.0,
+        "harshness_db": 0.0, "harshness_freq": 3500.0,
         "presence_boost": 0.0, "presence_freq": 5000.0,
         "air_boost": 0.0, "air_freq": 12000.0,
         "deesser_threshold": 0.0,
         "saturation_drive": 0.0,
+        "leveler_threshold": 0.0, "leveler_ratio": 1.0,
+        "leveler_attack": 10.0, "leveler_release": 100.0,
         "compressor_threshold": 0.0, "compressor_ratio": 1.0,
         "compressor_attack": 10.0, "compressor_release": 100.0,
         "reverb_room_size": 0.0, "reverb_damping": 1.0,
@@ -441,8 +466,14 @@ def recording_screen(stream: AudioStream, karaoke_audio: np.ndarray, sr: int, mo
 
 
 def _build_effects_chain(params: dict):
-    """Studio-grade vocal chain. Order matters:
-    HPF → Low Cut → De-esser → Presence → Air → Compressor → Saturation → Limiter → Reverb
+    """Professional studio vocal chain. Order follows the canonical signal flow:
+
+      SUBTRACTIVE EQ → DYNAMICS → ADDITIVE EQ → SPATIAL
+
+    1. HPF (rumble)          2. Low-cut (mud)       3. Boxiness notch
+    4. Harshness notch       5. Leveling compressor  6. Color compressor
+    7. Saturation            8. Presence boost       9. Air boost
+    10. Vocal limiter        11. Pre-delay           12. Reverb
     """
     from pedalboard import (
         Compressor, HighpassFilter, Pedalboard, Reverb,
@@ -451,10 +482,12 @@ def _build_effects_chain(params: dict):
     )
     plugins = []
 
+    # === SUBTRACTIVE EQ — clean up before shaping ===
+
     # 1. High-pass filter (remove rumble)
     plugins.append(HighpassFilter(cutoff_frequency_hz=params.get("highpass_cutoff", 80.0)))
 
-    # 2. Low shelf cut (remove boxiness/mud)
+    # 2. Low shelf cut (remove mud)
     low_cut = params.get("low_cut_db", 0.0)
     if low_cut < 0:
         plugins.append(LowShelfFilter(
@@ -462,24 +495,36 @@ def _build_effects_chain(params: dict):
             gain_db=low_cut,
         ))
 
-    # 3. Presence boost (vocal clarity)
-    presence = params.get("presence_boost", 0.0)
-    if presence > 0:
+    # 3. Boxiness notch (subtractive — nasal/cardboard resonance ~300-500 Hz)
+    boxiness_db = params.get("boxiness_db", 0.0)
+    if boxiness_db < 0:
         plugins.append(PeakFilter(
-            cutoff_frequency_hz=params.get("presence_freq", 3000.0),
-            gain_db=presence,
-            q=0.8,
+            cutoff_frequency_hz=params.get("boxiness_freq", 400.0),
+            gain_db=boxiness_db,
+            q=1.5,
         ))
 
-    # 4. Air boost (high shelf for shimmer)
-    air = params.get("air_boost", 0.0)
-    if air > 0:
-        plugins.append(HighShelfFilter(
-            cutoff_frequency_hz=params.get("air_freq", 12000.0),
-            gain_db=air,
+    # 4. Harshness notch (subtractive — ear-piercing resonance ~2.5-4 kHz)
+    harshness_db = params.get("harshness_db", 0.0)
+    if harshness_db < 0:
+        plugins.append(PeakFilter(
+            cutoff_frequency_hz=params.get("harshness_freq", 3500.0),
+            gain_db=harshness_db,
+            q=2.0,
         ))
 
-    # 5. Main compressor (dynamic control)
+    # === DYNAMICS — control the performance ===
+
+    # 5. Leveling compressor (gentle, slow — evens out level for a "locked" vocal)
+    if params.get("leveler_threshold", 0) < 0:
+        plugins.append(Compressor(
+            threshold_db=params["leveler_threshold"],
+            ratio=params.get("leveler_ratio", 2.0),
+            attack_ms=params.get("leveler_attack", 10.0),
+            release_ms=params.get("leveler_release", 150.0),
+        ))
+
+    # 6. Color compressor (character/glue — adds punch and consistency)
     if params.get("compressor_threshold", 0) < 0:
         plugins.append(Compressor(
             threshold_db=params["compressor_threshold"],
@@ -488,18 +533,39 @@ def _build_effects_chain(params: dict):
             release_ms=params.get("compressor_release", 80.0),
         ))
 
-    # 6. Real saturation (Distortion plugin, not fake EQ+Gain)
+    # 7. Saturation (harmonic excitement / warmth)
     drive = params.get("saturation_drive", 0.0)
     if drive > 0:
         plugins.append(Distortion(drive_db=drive))
 
-    # 7. Vocal limiter (catch peaks before mix, -3dBFS ceiling)
+    # === ADDITIVE EQ — enhance tone after dynamics ===
+
+    # 8. Presence boost (vocal clarity / intelligibility)
+    presence = params.get("presence_boost", 0.0)
+    if presence > 0:
+        plugins.append(PeakFilter(
+            cutoff_frequency_hz=params.get("presence_freq", 3000.0),
+            gain_db=presence,
+            q=0.8,
+        ))
+
+    # 9. Air boost (high shelf for shimmer / openness)
+    air = params.get("air_boost", 0.0)
+    if air > 0:
+        plugins.append(HighShelfFilter(
+            cutoff_frequency_hz=params.get("air_freq", 12000.0),
+            gain_db=air,
+        ))
+
+    # === SPATIAL — glue and space ===
+
+    # 10. Vocal limiter (catch peaks before mix, -3dBFS ceiling)
     plugins.append(Limiter(
         threshold_db=-3.0,
         release_ms=100,
     ))
 
-    # 8. Pre-delay (keeps vocal upfront before reverb)
+    # 11. Pre-delay (keeps vocal upfront before reverb)
     pre_delay = params.get("pre_delay_ms", 0.0)
     if pre_delay > 0:
         plugins.append(Delay(
@@ -508,7 +574,7 @@ def _build_effects_chain(params: dict):
             mix=1.0,
         ))
 
-    # 9. Reverb (tasteful, low wet)
+    # 12. Reverb (tasteful, low wet)
     if params.get("reverb_wet", 0) > 0:
         plugins.append(Reverb(
             room_size=params.get("reverb_room_size", 0.25),
@@ -622,6 +688,17 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
         nr = NoiseReducer()
         processed = nr.reduce(processed, sr)
 
+    if params.get("gate_enabled", True):
+        gate_db = params.get("gate_threshold_db", -50.0)
+        console.print(f"  [yellow]→[/yellow] Noise gate (threshold {gate_db}dB)...")
+        from app.pipeline.device_io import NoiseGate
+        gate = NoiseGate(
+            threshold_db=gate_db,
+            attack_ms=5.0, release_ms=150.0, hold_ms=200.0,
+            sample_rate=sr,
+        )
+        processed = gate.process(processed)
+
     if params.get("pitch_correct") and params.get("pitch_strength", 0) > 0:
         key = params.get("pitch_key", "C")
         scale = params.get("pitch_scale", "chromatic")
@@ -679,18 +756,24 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
         if karaoke.ndim == 1:
             karaoke = np.column_stack([karaoke, karaoke])
 
-        # Frequency-conscious ducking: dip 1-4kHz on instrumental when vocal present
+        # Multiband ducking: dip ONLY the vocal-presence band (1-4 kHz) on the
+        # instrumental when the vocal is active. The low end and highs stay
+        # untouched — far more transparent than broadband ducking (no pumping).
         duck_depth = params.get("duck_depth_db", 2.0)
         if duck_depth > 0:
-            console.print(f"  [yellow]→[/yellow] Frequency ducking ({duck_depth}dB @ 1-4kHz)...")
+            console.print(f"  [yellow]→[/yellow] Multiband ducking ({duck_depth}dB @ 1-4kHz)...")
+            from scipy.signal import butter, sosfiltfilt
+
             vocal_env = np.sqrt(np.mean(processed_stereo ** 2, axis=1)) if processed_stereo.ndim == 2 else np.abs(processed_stereo)
             env_smooth = np.convolve(vocal_env, np.ones(4800) / 4800, mode='same')
             threshold = np.percentile(env_smooth[env_smooth > 0], 25) if np.any(env_smooth > 0) else 0
             duck_gain = np.where(env_smooth > threshold, 10 ** (-duck_depth / 20), 1.0)
-            duck_gain = np.column_stack([duck_gain, duck_gain]) if duck_gain.ndim == 1 else duck_gain
 
+            sos = butter(4, [1000.0 / (sr / 2), 4000.0 / (sr / 2)], btype='band', output='sos')
             duck_len = min(len(duck_gain), len(karaoke))
-            karaoke[:duck_len] *= duck_gain[:duck_len]
+            for ch in range(karaoke.shape[1]):
+                mid = sosfiltfilt(sos, karaoke[:duck_len, ch])
+                karaoke[:duck_len, ch] = karaoke[:duck_len, ch] - mid + mid * duck_gain[:duck_len]
 
         # Perceived-loudness balance: LUFS-match the vocal to the instrumental
         # so both sit at the same perceptual volume (peak normalization can't
@@ -712,24 +795,25 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
 
         mixed = processed_stereo + karaoke
 
-        # True-peak safe gain staging: measure, back off, then limit
         true_peak_target = params.get("true_peak", -1.0)
         target_linear = 10 ** (true_peak_target / 20.0)
 
-        # Measure true peak via 4x oversampling
-        mono_mix = np.mean(mixed, axis=1) if mixed.ndim == 2 else mixed
-        oversampled = librosa.resample(mono_mix, orig_sr=sr, target_sr=sr * 4)
-        true_peak = float(np.max(np.abs(oversampled)))
+        def _measure_true_peak(sig):
+            """Max inter-sample peak across ALL channels (4x oversampling)."""
+            chans = [sig] if sig.ndim == 1 else [sig[:, c] for c in range(sig.shape[1])]
+            return max(
+                float(np.max(np.abs(librosa.resample(ch, orig_sr=sr, target_sr=sr * 4))))
+                for ch in chans
+            )
 
-        if true_peak > target_linear:
-            backoff = true_peak / target_linear
+        # Pre-limit gain staging: back off so the limiter works gently
+        tp = _measure_true_peak(mixed)
+        if tp > target_linear:
+            backoff = tp / target_linear
             mixed /= backoff
-            tp_db = 20 * np.log10(max(true_peak, 1e-10))
-            console.print(f"  [dim]True peak backoff: -{20*np.log10(backoff):.1f}dB (was {tp_db:.1f} dBTP)[/dim]")
+            console.print(f"  [dim]Pre-limit backoff: -{20*np.log10(backoff):.1f}dB (true peak {20*np.log10(max(tp, 1e-10)):.1f} dBTP)[/dim]")
 
-        mixed = np.clip(mixed, -target_linear, target_linear)
-
-        # Final bus limiter (safety net only, should barely engage)
+        # Final bus limiter
         if mixed.ndim == 2:
             mixed_fmt = mixed.T.copy()
         else:
@@ -742,6 +826,17 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
             final = limited.T
         else:
             final = limited[0]
+
+        # The Pedalboard limiter is sample-peak based and leaves inter-sample
+        # peaks above its ceiling. Measure the ACTUAL output and apply a
+        # corrective scalar backoff — this guarantees true-peak compliance.
+        out_tp = _measure_true_peak(final)
+        if out_tp > target_linear:
+            final *= target_linear / out_tp
+            console.print(
+                f"  [dim]ISP backoff: -{20*np.log10(out_tp / target_linear):.1f}dB "
+                f"({20*np.log10(max(out_tp, 1e-10)):.1f} → {true_peak_target:.1f} dBTP)[/dim]"
+            )
     else:
         final = processed
 
