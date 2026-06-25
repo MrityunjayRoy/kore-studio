@@ -20,7 +20,7 @@ class NoiseReducer:
         self.model, self.df_state, _ = init_df()
         self.model_sr: int = self.df_state.sr()
 
-    def reduce(self, audio: np.ndarray, sr: int) -> np.ndarray:
+    def reduce(self, audio: np.ndarray, sr: int, atten_lim_db: float = 6.0) -> np.ndarray:
         n_samples = audio.shape[-1]
         needs_resample = sr != self.model_sr
 
@@ -33,7 +33,8 @@ class NoiseReducer:
             audio_tensor = torch.from_numpy(audio)
 
         with torch.no_grad():
-            enhanced = enhance(self.model, self.df_state, audio_tensor)
+            enhanced = enhance(self.model, self.df_state, audio_tensor,
+                               atten_lim_db=atten_lim_db)
 
         enhanced_np = enhanced.cpu().numpy()
         if enhanced_np.ndim == 2 and enhanced_np.shape[0] == 1:

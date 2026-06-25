@@ -92,7 +92,7 @@ class NoiseGate:
         release_dec = 1.0 / max(1, release_blocks)
 
         gain = np.zeros(n_blocks * block_size, dtype=np.float32)
-        env = 0.0
+        env = 1.0  # start OPEN — don't clip the beginning of the vocal
         hold_counter = 0
 
         for i in range(n_blocks):
@@ -388,21 +388,20 @@ class AudioStream:
                 total = int(self.sample_rate * duration / self.chunk_size) + 1
                 n_out = len(out_bytes_list)
 
-                # Warm-up pre-roll: discard first 2 seconds of input to let
-                # USB mic / Bluetooth driver stabilize. Play karaoke from the
-                # start so user hears music immediately.
+                # Warm-up pre-roll: 2-second count-in. Play SILENCE (not the
+                # backing track) and discard input so USB / Bluetooth drivers
+                # stabilise. The backing track then starts from t=0 during
+                # recording — keeping the vocal perfectly aligned with no
+                # clipped or muted beginning.
                 warmup_chunks = int(self.sample_rate * 2.0 / self.chunk_size)
-                warmup_out_pos = 0
                 for _ in range(warmup_chunks):
                     in_stream.read(self.chunk_size, exception_on_overflow=False)
-                    out_data = out_bytes_list[warmup_out_pos] if warmup_out_pos < n_out else silence_bytes
-                    out_stream.write(out_data)
-                    warmup_out_pos += 1
+                    out_stream.write(silence_bytes)
 
                 prev_vocal = None
                 diagnostic_chunks = min(total, int(self.sample_rate * 5.0 / self.chunk_size))
                 diag_log = []
-                out_pos = warmup_out_pos
+                out_pos = 0
 
                 for i in range(total):
                     if not self._recording.is_set():

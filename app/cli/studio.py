@@ -37,7 +37,7 @@ PRESETS = {
         "pitch_correct": True, "pitch_key": "C", "pitch_scale": "chromatic", "pitch_strength": 0.5,
         "highpass_cutoff": 80.0,
         "low_cut_db": -1.5, "low_cut_freq": 200.0,
-        "gate_enabled": True, "gate_threshold_db": -50.0,
+        "gate_enabled": True, "gate_threshold_db": -60.0,
         "boxiness_db": -2.0, "boxiness_freq": 400.0,
         "harshness_db": -2.0, "harshness_freq": 3500.0,
         "presence_boost": 5.0, "presence_freq": 3000.0,
@@ -61,7 +61,7 @@ PRESETS = {
         "pitch_correct": True, "pitch_key": "C", "pitch_scale": "major", "pitch_strength": 0.7,
         "highpass_cutoff": 80.0,
         "low_cut_db": -1.0, "low_cut_freq": 200.0,
-        "gate_enabled": True, "gate_threshold_db": -48.0,
+        "gate_enabled": True, "gate_threshold_db": -58.0,
         "boxiness_db": -2.0, "boxiness_freq": 350.0,
         "harshness_db": -3.0, "harshness_freq": 3000.0,
         "presence_boost": 6.0, "presence_freq": 3000.0,
@@ -84,7 +84,7 @@ PRESETS = {
         "pitch_correct": True, "pitch_key": "C", "pitch_scale": "major", "pitch_strength": 0.6,
         "highpass_cutoff": 80.0,
         "low_cut_db": -1.0, "low_cut_freq": 200.0,
-        "gate_enabled": True, "gate_threshold_db": -45.0,
+        "gate_enabled": True, "gate_threshold_db": -65.0,
         "boxiness_db": -1.5, "boxiness_freq": 400.0,
         "harshness_db": -1.5, "harshness_freq": 3500.0,
         "presence_boost": 4.0, "presence_freq": 3000.0,
@@ -107,7 +107,7 @@ PRESETS = {
         "pitch_correct": False, "pitch_key": "C", "pitch_scale": "chromatic", "pitch_strength": 0.0,
         "highpass_cutoff": 80.0,
         "low_cut_db": -2.0, "low_cut_freq": 200.0,
-        "gate_enabled": True, "gate_threshold_db": -55.0,
+        "gate_enabled": True, "gate_threshold_db": -65.0,
         "boxiness_db": -3.0, "boxiness_freq": 450.0,
         "harshness_db": -2.0, "harshness_freq": 3500.0,
         "presence_boost": 3.5, "presence_freq": 3000.0,
@@ -164,6 +164,20 @@ def new_session_id() -> str:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     short = uuid.uuid4().hex[:8]
     return f"{ts}-{short}"
+
+
+def list_sessions() -> list:
+    """Return [(session_id, session_dir), ...] for sessions that have vocal + instrumental, newest first."""
+    if not os.path.isdir(SESSIONS_DIR):
+        return []
+    sessions = []
+    for name in sorted(os.listdir(SESSIONS_DIR), reverse=True):
+        d = os.path.join(SESSIONS_DIR, name)
+        if (os.path.isdir(d)
+                and os.path.isfile(os.path.join(d, "vocal.wav"))
+                and os.path.isfile(os.path.join(d, "instrumental.wav"))):
+            sessions.append((name, d))
+    return sessions
 
 
 def list_karaoke_files() -> list:
@@ -342,7 +356,7 @@ def pre_roll_screen(input_dev, output_dev, karaoke_path, monitor_level, input_ga
         console.print("[red]Speaker playback will bleed into your microphone.[/red]")
         console.print("[yellow]For best results, use headphones during recording.[/yellow]")
 
-    console.print("\n[dim]Noise gate removed — DeepFilterNet handles noise in post[/dim]")
+    console.print("\n[dim]A 2-second count-in will play before the music starts — get ready.[/dim]")
     console.print("[dim]Press [bold]ENTER[/bold] to start recording, [bold]Ctrl+C[/bold] to cancel[/dim]")
     try:
         input()
@@ -684,12 +698,13 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
     console.print("\n[bold cyan]Processing Pipeline[/bold cyan]")
 
     if params.get("noise_reduction"):
-        console.print("  [yellow]→[/yellow] Noise reduction (DeepFilterNet)...")
+        nr_limit = params.get("nr_atten_lim_db", 6.0)
+        console.print(f"  [yellow]→[/yellow] Noise reduction (DeepFilterNet, max {nr_limit}dB)...")
         nr = NoiseReducer()
-        processed = nr.reduce(processed, sr)
+        processed = nr.reduce(processed, sr, atten_lim_db=nr_limit)
 
     if params.get("gate_enabled", True):
-        gate_db = params.get("gate_threshold_db", -50.0)
+        gate_db = params.get("gate_threshold_db", -60.0)
         console.print(f"  [yellow]→[/yellow] Noise gate (threshold {gate_db}dB)...")
         from app.pipeline.device_io import NoiseGate
         gate = NoiseGate(
@@ -1138,14 +1153,103 @@ def post_record_menu(recorded: np.ndarray, sr: int, karaoke_path: Optional[str] 
             return "cancel"
 
 
+def reprocess_session(session_dir: str, preset_name: str = "Studio Clean") -> str:
+    """Re-run the full mixing pipeline on an existing session's vocal + instrumental."""
+    vocal, sr = sf.read(os.path.join(session_dir, "vocal.wav"), dtype='float32')
+    inst_path = os.path.join(session_dir, "instrumental.wav")
+    params = dict(PRESETS.get(preset_name, DEFAULT_PARAMS))
+    output = os.path.join(session_dir, "mixed.wav")
+    apply_effects(vocal, sr, params, karaoke_path=inst_path, output_path=output)
+    return output
+
+
+def reprocess_menu(preset_name: str = "Studio Clean"):
+    """Interactive: pick a session (or all), pick a preset, re-process."""
+    sessions = list_sessions()
+    if not sessions:
+        console.print(f"[yellow]No sessions found in {SESSIONS_DIR}/[/yellow]")
+        return
+
+    console.print(Panel("[bold cyan]Re-process Existing Sessions[/bold cyan]", border_style="cyan"))
+    console.print(f"[dim]Found {len(sessions)} session(s)[/dim]\n")
+
+    choices = [(sid, sdir) for sid, sdir in sessions]
+    if len(sessions) > 1:
+        choices.append(("All sessions", "__all__"))
+    q = [inquirer.List("pick", message="Select session to re-process",
+                       choices=choices, default=choices[0])]
+    a = inquirer.prompt(q)
+    if not a:
+        return
+
+    preset_choices = list(PRESETS.keys())
+    q = [inquirer.List("preset", message="Select preset", choices=preset_choices,
+                       default=preset_name if preset_name in preset_choices else preset_choices[0])]
+    a2 = inquirer.prompt(q)
+    if not a2:
+        return
+    preset = a2["preset"]
+
+    selected = a["pick"]
+    if selected == "__all__":
+        for sid, sdir in sessions:
+            console.print(f"\n[bold cyan]Re-processing {sid} ({preset})...[/bold cyan]")
+            reprocess_session(sdir, preset)
+        console.print(f"\n[bold green]Done![/bold green] Re-processed {len(sessions)} session(s).")
+    else:
+        sid = os.path.basename(selected)
+        console.print(f"\n[bold cyan]Re-processing {sid} ({preset})...[/bold cyan]")
+        out = reprocess_session(selected, preset)
+        console.print(f"[bold green]Done![/bold green] Output: {out}")
+
+
 def main(args=None):
     os.makedirs(KARAOKES_DIR, exist_ok=True)
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+    # CLI flags: kore studio --reprocess [--all] [--preset "Studio Clean"]
+    argv = sys.argv[1:]
+    do_reprocess = "--reprocess" in argv
+    do_all = "--all" in argv
+    preset_name = "Studio Clean"
+    if "--preset" in argv:
+        idx = argv.index("--preset")
+        if idx + 1 < len(argv):
+            preset_name = argv[idx + 1]
+
+    if do_reprocess:
+        if do_all:
+            sessions = list_sessions()
+            if not sessions:
+                console.print(f"[yellow]No sessions found in {SESSIONS_DIR}/[/yellow]")
+                return
+            for sid, sdir in sessions:
+                console.print(f"\n[bold cyan]Re-processing {sid} ({preset_name})...[/bold cyan]")
+                reprocess_session(sdir, preset_name)
+            console.print(f"\n[bold green]Done![/bold green] Re-processed {len(sessions)} session(s).")
+        else:
+            reprocess_menu(preset_name)
+        console.print("[dim]Goodbye![/dim]")
+        return
 
     console.print(Panel(
         "[bold cyan]KORE Studio[/bold cyan]\n"
         "Record vocals over karaoke with studio-quality effects",
         border_style="cyan",
     ))
+
+    # If sessions exist, offer to re-process instead of recording
+    sessions = list_sessions()
+    if sessions:
+        q = [inquirer.List("mode", message="What do you want to do?", choices=[
+            "Record new take",
+            f"Re-process existing session ({len(sessions)} found)",
+        ])]
+        a = inquirer.prompt(q)
+        if a and a["mode"].startswith("Re-process"):
+            reprocess_menu()
+            console.print("[dim]Goodbye![/dim]")
+            return
 
     input_dev, output_dev, karaoke_path, monitor_level, input_gain = select_devices()
 
