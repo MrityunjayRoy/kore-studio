@@ -462,17 +462,7 @@ def _build_effects_chain(params: dict):
             gain_db=low_cut,
         ))
 
-    # 3. De-esser BEFORE presence boost (critical ordering)
-    deesser_thresh = params.get("deesser_threshold", 0.0)
-    if deesser_thresh < 0:
-        plugins.append(Compressor(
-            threshold_db=deesser_thresh,
-            ratio=5.0,
-            attack_ms=0.5,
-            release_ms=20.0,
-        ))
-
-    # 4. Presence boost (vocal clarity, now safe after de-esser)
+    # 3. Presence boost (vocal clarity)
     presence = params.get("presence_boost", 0.0)
     if presence > 0:
         plugins.append(PeakFilter(
@@ -481,7 +471,7 @@ def _build_effects_chain(params: dict):
             q=0.8,
         ))
 
-    # 5. Air boost (high shelf for shimmer)
+    # 4. Air boost (high shelf for shimmer)
     air = params.get("air_boost", 0.0)
     if air > 0:
         plugins.append(HighShelfFilter(
@@ -489,7 +479,7 @@ def _build_effects_chain(params: dict):
             gain_db=air,
         ))
 
-    # 6. Main compressor (dynamic control)
+    # 5. Main compressor (dynamic control)
     if params.get("compressor_threshold", 0) < 0:
         plugins.append(Compressor(
             threshold_db=params["compressor_threshold"],
@@ -498,18 +488,18 @@ def _build_effects_chain(params: dict):
             release_ms=params.get("compressor_release", 80.0),
         ))
 
-    # 7. Real saturation (Distortion plugin, not fake EQ+Gain)
+    # 6. Real saturation (Distortion plugin, not fake EQ+Gain)
     drive = params.get("saturation_drive", 0.0)
     if drive > 0:
         plugins.append(Distortion(drive_db=drive))
 
-    # 8. Vocal limiter (catch peaks before mix, -3dBFS ceiling)
+    # 7. Vocal limiter (catch peaks before mix, -3dBFS ceiling)
     plugins.append(Limiter(
         threshold_db=-3.0,
         release_ms=100,
     ))
 
-    # 9. Pre-delay (keeps vocal upfront before reverb)
+    # 8. Pre-delay (keeps vocal upfront before reverb)
     pre_delay = params.get("pre_delay_ms", 0.0)
     if pre_delay > 0:
         plugins.append(Delay(
@@ -518,7 +508,7 @@ def _build_effects_chain(params: dict):
             mix=1.0,
         ))
 
-    # 10. Reverb (tasteful, low wet)
+    # 9. Reverb (tasteful, low wet)
     if params.get("reverb_wet", 0) > 0:
         plugins.append(Reverb(
             room_size=params.get("reverb_room_size", 0.25),
@@ -529,6 +519,48 @@ def _build_effects_chain(params: dict):
         ))
 
     return Pedalboard(plugins)
+
+
+def _deess(audio: np.ndarray, sr: int, threshold_db: float = -20.0,
+           ratio: float = 3.0, split_freq: float = 6000.0) -> np.ndarray:
+    """Frequency-selective de-esser.
+
+    Compresses ONLY the sibilant band (above split_freq) when its energy
+    exceeds threshold, leaving the vocal fundamental and belting notes
+    (mostly <2 kHz) untouched — unlike a broadband compressor which dips
+    the whole signal on loud notes.
+    """
+    if threshold_db >= 0 or len(audio) == 0:
+        return audio
+
+    from scipy.signal import butter, sosfiltfilt
+
+    mono = audio if audio.ndim == 1 else np.mean(audio, axis=1)
+    mono = mono.astype(np.float32)
+
+    # Split into sibilant (high) and body (low) bands
+    sos = butter(4, split_freq / (sr / 2), btype='high', output='sos')
+    high = sosfiltfilt(sos, mono).astype(np.float32)
+
+    # Smoothed envelope of the sibilant band (~30 ms window)
+    env = np.abs(high)
+    win = max(1, int(sr * 0.03))
+    env = np.convolve(env, np.ones(win) / win, mode='same')
+
+    # Compress only where sibilant energy exceeds threshold
+    threshold_lin = 10 ** (threshold_db / 20)
+    gain = np.ones_like(env)
+    over = env > threshold_lin
+    if np.any(over):
+        oe = env[over]
+        gain[over] = (threshold_lin * (oe / threshold_lin) ** (1.0 / ratio)) / oe
+
+    low = mono - high
+    mono_out = (low + high * gain).astype(np.float32)
+
+    if audio.ndim == 2:
+        return np.column_stack([mono_out, mono_out])
+    return mono_out
 
 
 def _apply_vocal_doubler(audio: np.ndarray, sr: int, delay_ms: float = 12.0,
@@ -575,7 +607,6 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
                   output_path: str = "kore_studio_output.wav") -> np.ndarray:
     from app.pipeline.noise_reducer_service import NoiseReducer
     from app.pipeline.pitch_correct import auto_pitch_correct
-    from app.pipeline.mixer import peak_normalize, match_channels
     import librosa
     import pyloudnorm as pyln
     from pedalboard import Limiter
@@ -606,6 +637,11 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
 
     gain = params.get("gain", 1.0)
     processed = np.clip(processed * gain, -1.0, 1.0)
+
+    deess_thresh = params.get("deesser_threshold", 0.0)
+    if deess_thresh < 0:
+        console.print("  [yellow]→[/yellow] De-esser (sibilance control, freq-selective)...")
+        processed = _deess(processed, sr, threshold_db=deess_thresh)
 
     use_doubler = params.get("doubler_enabled", False)
     doubler_delay = params.get("doubler_delay_ms", 12.0)
@@ -656,11 +692,19 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
             duck_len = min(len(duck_gain), len(karaoke))
             karaoke[:duck_len] *= duck_gain[:duck_len]
 
-        vocal_target = params.get("vocal_target", -8.0)
-        karaoke_target = params.get("karaoke_target", -12.0)
-
-        processed_stereo = peak_normalize(processed_stereo, vocal_target)
-        karaoke = peak_normalize(karaoke, karaoke_target)
+        # Perceived-loudness balance: LUFS-match the vocal to the instrumental
+        # so both sit at the same perceptual volume (peak normalization can't
+        # do this — a dynamic vocal and a dense instrumental at equal peak
+        # differ by many LUFS in perceived loudness).
+        meter = pyln.Meter(sr)
+        inst_loud = meter.integrated_loudness(karaoke)
+        vocal_loud = meter.integrated_loudness(processed_stereo)
+        if not (np.isinf(inst_loud) or np.isinf(vocal_loud)):
+            processed_stereo = pyln.normalize.loudness(processed_stereo, vocal_loud, inst_loud)
+            console.print(
+                f"  [dim]Vocal matched to instrumental: "
+                f"{vocal_loud:.1f} → {inst_loud:.1f} LUFS[/dim]"
+            )
 
         min_len = min(len(processed_stereo), len(karaoke))
         processed_stereo = processed_stereo[:min_len]
