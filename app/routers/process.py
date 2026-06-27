@@ -1,36 +1,15 @@
-import tempfile
 import os
-import shutil
 import logging
 from pathlib import Path
-from contextlib import asynccontextmanager
 from typing import Optional
 
-import soundfile as sf
-import numpy as np
-
-try:
-    from fastapi import FastAPI, UploadFile, File, Form
-    from fastapi.responses import FileResponse
-    import uvicorn
-except ImportError:
-    import subprocess
-    import sys
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "fastapi", "uvicorn", "python-multipart"])
-    from fastapi import FastAPI, UploadFile, File, Form
-    from fastapi.responses import FileResponse
-    import uvicorn
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from app.pipeline.studio_pipeline import PRESETS, process_files
-from app.pipeline.noise_reducer_service import NoiseReducer
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [KoreAPI] %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
-
-WORK_DIR = Path(tempfile.mkdtemp(prefix="kore_api_"))
-_noise_reducer: Optional[NoiseReducer] = None
-
-_PRESET_ALIASES = {k.lower(): v for v in PRESETS for k in [v, v.lower()]}
+router = APIRouter()
 
 
 def _resolve_preset(name: str) -> dict:
@@ -40,24 +19,13 @@ def _resolve_preset(name: str) -> dict:
     for key in PRESETS:
         if key.lower() == lower or lower == key.lower().split()[0]:
             return dict(PRESETS[key])
-    logger.warning(f"Unknown preset '{name}', falling back to Studio Clean")
+    logger.warning("Unknown preset '%s', falling back to Studio Clean", name)
     return dict(PRESETS["Studio Clean"])
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _noise_reducer
-    logger.info("Loading DeepFilterNet noise reducer (shared across requests)...")
-    _noise_reducer = NoiseReducer()
-    yield
-    shutil.rmtree(WORK_DIR, ignore_errors=True)
-
-
-app = FastAPI(title="Kore Processing API", lifespan=lifespan)
-
-
-@app.post("/process")
-async def process(
+@router.post("/process")
+async def process_audio(
+    request: Request,
     vocal: UploadFile = File(...),
     instrumental: UploadFile = File(...),
     preset: str = Form("Studio Clean"),
@@ -105,7 +73,10 @@ async def process(
     input_gain: Optional[float] = Form(None),
     gain: Optional[float] = Form(None),
 ):
-    logger.info(f"Request: preset={preset}, vocal={vocal.filename}, inst={instrumental.filename}")
+    logger.info(
+        "Request: preset=%s, vocal=%s, inst=%s",
+        preset, vocal.filename, instrumental.filename,
+    )
     params = _resolve_preset(preset)
 
     float_overrides = {
@@ -147,14 +118,12 @@ async def process(
         "input_gain": input_gain,
         "gain": gain,
     }
-
     bool_overrides = {
         "pitch_correct": pitch_correct,
         "noise_reduction": noise_reduction,
         "doubler_enabled": doubler_enabled,
         "gate_enabled": gate_enabled,
     }
-
     str_overrides = {
         "pitch_key": pitch_key,
         "pitch_scale": pitch_scale,
@@ -163,54 +132,45 @@ async def process(
     for key, value in float_overrides.items():
         if value is not None:
             params[key] = value
-
     for key, value in bool_overrides.items():
         if value is not None:
             params[key] = value
-
     for key, value in str_overrides.items():
         if value is not None:
             params[key] = value
 
-    job_id = os.urandom(4).hex()
-    job_dir = WORK_DIR / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
+    import tempfile
+    work_dir = Path(tempfile.mkdtemp(prefix="kore_process_"))
 
     try:
-        vocal_path = job_dir / "vocal.wav"
-        inst_path = job_dir / "instrumental.wav"
-        out_path = job_dir / "output.wav"
-        conv_path = job_dir / "output_16bit.wav"
+        vocal_path = work_dir / "vocal.wav"
+        inst_path = work_dir / "instrumental.wav"
+        out_path = work_dir / "output.wav"
 
         with open(vocal_path, "wb") as f:
             f.write(await vocal.read())
         with open(inst_path, "wb") as f:
             f.write(await instrumental.read())
 
-        logger.info(f"Processing with {len(params)} params...")
-        process_files(str(vocal_path), str(inst_path), str(out_path), params,
-                      noise_reducer=_noise_reducer)
+        process_files(
+            str(vocal_path), str(inst_path), str(out_path), params,
+            noise_reducer=request.app.state.noise_reducer,
+        )
 
         if not out_path.exists():
-            logger.error("Output not created!")
-            return {"error": "Output not created"}, 500
+            raise HTTPException(status_code=500, detail="Output not created")
 
-        logger.info(f"Output: {out_path.stat().st_size} bytes, converting to 16-bit...")
-        data, sr = sf.read(str(out_path), dtype='float32')
-        sf.write(str(conv_path), data, int(sr), subtype="PCM_16")
+        return FileResponse(
+            str(out_path),
+            media_type="audio/wav",
+            filename="kore_output.wav",
+        )
 
-        logger.info(f"Final output: {conv_path.stat().st_size} bytes")
-        return FileResponse(str(conv_path), media_type="audio/wav", filename="kore_output.wav")
-
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.exception("Unexpected error")
-        return {"error": str(e)}, 500
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8765)
+        logger.exception("Processing failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        import shutil
+        shutil.rmtree(work_dir, ignore_errors=True)
