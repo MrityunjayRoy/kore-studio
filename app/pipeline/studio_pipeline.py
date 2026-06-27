@@ -288,7 +288,8 @@ def _apply_vocal_doubler(audio: np.ndarray, sr: int, delay_ms: float = 12.0,
 
 def apply_effects(vocal: np.ndarray, sr: int, params: dict,
                   karaoke_path: Optional[str] = None,
-                  output_path: str = "kore_studio_output.wav") -> np.ndarray:
+                  output_path: str = "kore_studio_output.wav",
+                  noise_reducer: Optional['NoiseReducer'] = None) -> np.ndarray:
     from app.pipeline.noise_reducer_service import NoiseReducer
     from app.pipeline.pitch_correct import auto_pitch_correct
     import librosa
@@ -304,7 +305,7 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
     if params.get("noise_reduction"):
         nr_limit = params.get("nr_atten_lim_db", 6.0)
         console.print(f"  [yellow]→[/yellow] Noise reduction (DeepFilterNet, max {nr_limit}dB)...")
-        nr = NoiseReducer()
+        nr = noise_reducer if noise_reducer is not None else NoiseReducer()
         processed = nr.reduce(processed, sr, atten_lim_db=nr_limit)
 
     if params.get("gate_enabled", True):
@@ -462,6 +463,8 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
     return final
 
 
-def process_files(vocal_path: str, karaoke_path: str, output_path: str, params: dict) -> np.ndarray:
+def process_files(vocal_path: str, karaoke_path: str, output_path: str, params: dict,
+                  noise_reducer: Optional['NoiseReducer'] = None) -> np.ndarray:
     vocal, sr = sf.read(vocal_path, dtype='float32')
-    return apply_effects(vocal, sr, params, karaoke_path=karaoke_path, output_path=output_path)
+    return apply_effects(vocal, sr, params, karaoke_path=karaoke_path,
+                         output_path=output_path, noise_reducer=noise_reducer)
