@@ -5,6 +5,13 @@ import numpy as np
 import soundfile as sf
 from rich.console import Console
 
+from pedalboard import (
+        Compressor, HighpassFilter, Pedalboard, Reverb,
+        PeakFilter, HighShelfFilter, LowShelfFilter,
+        Distortion, Limiter, Delay,
+    )
+from scipy.signal import butter, sosfiltfilt
+
 console = Console()
 
 PRESETS = {
@@ -130,11 +137,6 @@ DEFAULT_PARAMS = dict(PRESETS["Studio Clean"])
 
 
 def _build_effects_chain(params: dict):
-    from pedalboard import (
-        Compressor, HighpassFilter, Pedalboard, Reverb,
-        PeakFilter, HighShelfFilter, LowShelfFilter,
-        Distortion, Limiter, Delay,
-    )
     plugins = []
 
     plugins.append(HighpassFilter(cutoff_frequency_hz=params.get("highpass_cutoff", 80.0)))
@@ -227,7 +229,6 @@ def _deess(audio: np.ndarray, sr: int, threshold_db: float = -20.0,
     if threshold_db >= 0 or len(audio) == 0:
         return audio
 
-    from scipy.signal import butter, sosfiltfilt
 
     mono = audio if audio.ndim == 1 else np.mean(audio, axis=1)
     mono = mono.astype(np.float32)
@@ -377,7 +378,6 @@ def apply_effects(vocal: np.ndarray, sr: int, params: dict,
         duck_depth = params.get("duck_depth_db", 2.0)
         if duck_depth > 0:
             console.print(f"  [yellow]→[/yellow] Multiband ducking ({duck_depth}dB @ 1-4kHz)...")
-            from scipy.signal import butter, sosfiltfilt
 
             vocal_env = np.sqrt(np.mean(processed_stereo ** 2, axis=1)) if processed_stereo.ndim == 2 else np.abs(processed_stereo)
             env_smooth = np.convolve(vocal_env, np.ones(4800) / 4800, mode='same')
