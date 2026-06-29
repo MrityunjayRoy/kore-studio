@@ -1,96 +1,176 @@
 import tempfile
 import os
-import subprocess
-import sys
-import atexit
 import shutil
 import logging
 from pathlib import Path
+from contextlib import asynccontextmanager
+from typing import Optional
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [KoreAPI] %(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
+import soundfile as sf
+import numpy as np
 
 try:
     from fastapi import FastAPI, UploadFile, File, Form
     from fastapi.responses import FileResponse
     import uvicorn
 except ImportError:
+    import subprocess
+    import sys
     subprocess.check_call([sys.executable, "-m", "pip", "install", "fastapi", "uvicorn", "python-multipart"])
     from fastapi import FastAPI, UploadFile, File, Form
     from fastapi.responses import FileResponse
     import uvicorn
 
-app = FastAPI(title="Kore Processing API")
-KORE_DIR = Path(__file__).resolve().parent.parent
-WORK_DIR = Path(tempfile.mkdtemp(prefix="kore_api_"))
-atexit.register(lambda: shutil.rmtree(WORK_DIR, ignore_errors=True))
+from app.pipeline.studio_pipeline import PRESETS, process_files
+from app.pipeline.noise_reducer_service import NoiseReducer
 
-PRESETS = {
-    "studio": {"pitch_correct": True, "pitch_key": "C", "pitch_scale": "chromatic", "pitch_strength": 0.5,
-               "highpass_cutoff": 80, "compressor_threshold": -18, "compressor_ratio": 3.0,
-               "compressor_attack": 3, "compressor_release": 60, "reverb_room_size": 0.25,
-               "reverb_damping": 0.5, "reverb_wet": 0.10, "reverb_dry": 0.85, "reverb_width": 0.7,
-               "vocal_target": -8, "karaoke_target": -12, "loudness_target": -14, "true_peak": -1.0},
-    "smule":  {"pitch_correct": True, "pitch_key": "C", "pitch_scale": "major", "pitch_strength": 0.7,
-               "highpass_cutoff": 80, "compressor_threshold": -20, "compressor_ratio": 3.5,
-               "compressor_attack": 1.5, "compressor_release": 40, "reverb_room_size": 0.28,
-               "reverb_damping": 0.4, "reverb_wet": 0.12, "reverb_dry": 0.82, "reverb_width": 0.8,
-               "vocal_target": -8, "karaoke_target": -12, "loudness_target": -13, "true_peak": -1.0},
-    "live":   {"pitch_correct": True, "pitch_key": "C", "pitch_scale": "major", "pitch_strength": 0.6,
-               "highpass_cutoff": 80, "compressor_threshold": -22, "compressor_ratio": 4.0,
-               "compressor_attack": 2, "compressor_release": 40, "reverb_room_size": 0.45,
-               "reverb_damping": 0.3, "reverb_wet": 0.15, "reverb_dry": 0.78, "reverb_width": 1.0,
-               "vocal_target": -8, "karaoke_target": -12, "loudness_target": -13, "true_peak": -1.0},
-    "podcast":{"pitch_correct": False, "pitch_strength": 0.0,
-               "highpass_cutoff": 80, "compressor_threshold": -16, "compressor_ratio": 4.0,
-               "compressor_attack": 1, "compressor_release": 80, "reverb_room_size": 0.08,
-               "reverb_damping": 0.8, "reverb_wet": 0.02, "reverb_dry": 0.95, "reverb_width": 0.3,
-               "vocal_target": -8, "karaoke_target": -12, "loudness_target": -16, "true_peak": -1.0},
-    "raw":    {"pitch_correct": False, "pitch_strength": 0.0,
-               "highpass_cutoff": 20, "compressor_threshold": 0, "compressor_ratio": 1.0,
-               "compressor_attack": 10, "compressor_release": 100, "reverb_room_size": 0.0,
-               "reverb_damping": 1.0, "reverb_wet": 0.0, "reverb_dry": 1.0, "reverb_width": 0.0,
-               "vocal_target": -8, "karaoke_target": -12, "loudness_target": -14, "true_peak": -1.0},
-}
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [KoreAPI] %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
+
+WORK_DIR = Path(tempfile.mkdtemp(prefix="kore_api_"))
+_noise_reducer: Optional[NoiseReducer] = None
+
+_PRESET_ALIASES = {k.lower(): v for v in PRESETS for k in [v, v.lower()]}
+
+
+def _resolve_preset(name: str) -> dict:
+    if name in PRESETS:
+        return dict(PRESETS[name])
+    lower = name.lower()
+    for key in PRESETS:
+        if key.lower() == lower or lower == key.lower().split()[0]:
+            return dict(PRESETS[key])
+    logger.warning(f"Unknown preset '{name}', falling back to Studio Clean")
+    return dict(PRESETS["Studio Clean"])
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _noise_reducer
+    logger.info("Loading DeepFilterNet noise reducer (shared across requests)...")
+    _noise_reducer = NoiseReducer()
+    yield
+    shutil.rmtree(WORK_DIR, ignore_errors=True)
+
+
+app = FastAPI(title="Kore Processing API", lifespan=lifespan)
 
 
 @app.post("/process")
 async def process(
     vocal: UploadFile = File(...),
     instrumental: UploadFile = File(...),
-    preset: str = Form("smule"),
-    pitch_correct: bool = Form(True),
-    pitch_key: str = Form("C"),
-    pitch_scale: str = Form("major"),
-    pitch_strength: float = Form(0.7),
-    highpass_cutoff: float = Form(80.0),
-    compressor_threshold: float = Form(-20.0),
-    compressor_ratio: float = Form(3.5),
-    compressor_attack: float = Form(1.5),
-    compressor_release: float = Form(40.0),
-    reverb_room_size: float = Form(0.28),
-    reverb_damping: float = Form(0.4),
-    reverb_wet: float = Form(0.12),
-    reverb_dry: float = Form(0.82),
-    reverb_width: float = Form(0.8),
-    vocal_target: float = Form(-8.0),
-    karaoke_target: float = Form(-12.0),
-    loudness_target: float = Form(-13.0),
-    true_peak: float = Form(-1.0),
+    preset: str = Form("Studio Clean"),
+    pitch_correct: Optional[bool] = Form(None),
+    pitch_key: Optional[str] = Form(None),
+    pitch_scale: Optional[str] = Form(None),
+    pitch_strength: Optional[float] = Form(None),
+    highpass_cutoff: Optional[float] = Form(None),
+    compressor_threshold: Optional[float] = Form(None),
+    compressor_ratio: Optional[float] = Form(None),
+    compressor_attack: Optional[float] = Form(None),
+    compressor_release: Optional[float] = Form(None),
+    reverb_room_size: Optional[float] = Form(None),
+    reverb_damping: Optional[float] = Form(None),
+    reverb_wet: Optional[float] = Form(None),
+    reverb_dry: Optional[float] = Form(None),
+    reverb_width: Optional[float] = Form(None),
+    vocal_target: Optional[float] = Form(None),
+    karaoke_target: Optional[float] = Form(None),
+    loudness_target: Optional[float] = Form(None),
+    true_peak: Optional[float] = Form(None),
+    noise_reduction: Optional[bool] = Form(None),
+    saturation_drive: Optional[float] = Form(None),
+    presence_boost: Optional[float] = Form(None),
+    presence_freq: Optional[float] = Form(None),
+    air_boost: Optional[float] = Form(None),
+    air_freq: Optional[float] = Form(None),
+    deesser_threshold: Optional[float] = Form(None),
+    doubler_enabled: Optional[bool] = Form(None),
+    doubler_delay_ms: Optional[float] = Form(None),
+    doubler_feedback: Optional[float] = Form(None),
+    duck_depth_db: Optional[float] = Form(None),
+    gate_enabled: Optional[bool] = Form(None),
+    gate_threshold_db: Optional[float] = Form(None),
+    low_cut_db: Optional[float] = Form(None),
+    low_cut_freq: Optional[float] = Form(None),
+    boxiness_db: Optional[float] = Form(None),
+    boxiness_freq: Optional[float] = Form(None),
+    harshness_db: Optional[float] = Form(None),
+    harshness_freq: Optional[float] = Form(None),
+    leveler_threshold: Optional[float] = Form(None),
+    leveler_ratio: Optional[float] = Form(None),
+    leveler_attack: Optional[float] = Form(None),
+    leveler_release: Optional[float] = Form(None),
+    input_gain: Optional[float] = Form(None),
+    gain: Optional[float] = Form(None),
 ):
     logger.info(f"Request: preset={preset}, vocal={vocal.filename}, inst={instrumental.filename}")
-    p = PRESETS.get(preset, PRESETS["smule"])
-    params = {
-        "pitch_correct": pitch_correct, "pitch_key": pitch_key,
-        "pitch_scale": pitch_scale, "pitch_strength": pitch_strength,
-        "highpass_cutoff": highpass_cutoff, "compressor_threshold": compressor_threshold,
-        "compressor_ratio": compressor_ratio, "compressor_attack": compressor_attack,
-        "compressor_release": compressor_release, "reverb_room_size": reverb_room_size,
-        "reverb_damping": reverb_damping, "reverb_wet": reverb_wet,
-        "reverb_dry": reverb_dry, "reverb_width": reverb_width,
-        "vocal_target": vocal_target, "karaoke_target": karaoke_target,
-        "loudness_target": loudness_target, "true_peak": true_peak,
+    params = _resolve_preset(preset)
+
+    float_overrides = {
+        "pitch_strength": pitch_strength,
+        "highpass_cutoff": highpass_cutoff,
+        "compressor_threshold": compressor_threshold,
+        "compressor_ratio": compressor_ratio,
+        "compressor_attack": compressor_attack,
+        "compressor_release": compressor_release,
+        "reverb_room_size": reverb_room_size,
+        "reverb_damping": reverb_damping,
+        "reverb_wet": reverb_wet,
+        "reverb_dry": reverb_dry,
+        "reverb_width": reverb_width,
+        "vocal_target": vocal_target,
+        "karaoke_target": karaoke_target,
+        "loudness_target": loudness_target,
+        "true_peak": true_peak,
+        "saturation_drive": saturation_drive,
+        "presence_boost": presence_boost,
+        "presence_freq": presence_freq,
+        "air_boost": air_boost,
+        "air_freq": air_freq,
+        "deesser_threshold": deesser_threshold,
+        "doubler_delay_ms": doubler_delay_ms,
+        "doubler_feedback": doubler_feedback,
+        "duck_depth_db": duck_depth_db,
+        "gate_threshold_db": gate_threshold_db,
+        "low_cut_db": low_cut_db,
+        "low_cut_freq": low_cut_freq,
+        "boxiness_db": boxiness_db,
+        "boxiness_freq": boxiness_freq,
+        "harshness_db": harshness_db,
+        "harshness_freq": harshness_freq,
+        "leveler_threshold": leveler_threshold,
+        "leveler_ratio": leveler_ratio,
+        "leveler_attack": leveler_attack,
+        "leveler_release": leveler_release,
+        "input_gain": input_gain,
+        "gain": gain,
     }
+
+    bool_overrides = {
+        "pitch_correct": pitch_correct,
+        "noise_reduction": noise_reduction,
+        "doubler_enabled": doubler_enabled,
+        "gate_enabled": gate_enabled,
+    }
+
+    str_overrides = {
+        "pitch_key": pitch_key,
+        "pitch_scale": pitch_scale,
+    }
+
+    for key, value in float_overrides.items():
+        if value is not None:
+            params[key] = value
+
+    for key, value in bool_overrides.items():
+        if value is not None:
+            params[key] = value
+
+    for key, value in str_overrides.items():
+        if value is not None:
+            params[key] = value
 
     job_id = os.urandom(4).hex()
     job_dir = WORK_DIR / job_id
@@ -107,62 +187,20 @@ async def process(
         with open(inst_path, "wb") as f:
             f.write(await instrumental.read())
 
-        # Convert instrumental to WAV if it's not already
-        inst_wav = job_dir / "instrumental_conv.wav"
-        logger.info("Converting instrumental with ffmpeg...")
-        conv_result = subprocess.run(["ffmpeg", "-y", "-i", str(inst_path), "-vn", "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "2", str(inst_wav)], capture_output=True, timeout=60)
-        if inst_wav.exists() and inst_wav.stat().st_size > 1000:
-            logger.info(f"Converted OK: {inst_wav.stat().st_size} bytes")
-            inst_path = inst_wav
-        else:
-            logger.warning(f"Conversion failed. ffmpeg stderr: {conv_result.stderr[-300:]}")
-            return {"error": f"Failed to convert instrumental: {conv_result.stderr[-200:]}"}, 500
+        logger.info(f"Processing with {len(params)} params...")
+        process_files(str(vocal_path), str(inst_path), str(out_path), params,
+                      noise_reducer=_noise_reducer)
 
-        args = [sys.executable, "-m", "app.cli.kore", str(vocal_path), str(inst_path), "-o", str(out_path)]
-        # Pitch correction runs separately to avoid torch/numpy conflict
-        if params.get("pitch_correct"):
-            corrected_path = job_dir / "corrected.wav"
-            pc_args = [sys.executable, "-c", """
-import sys
-sys.path.insert(0, '{}')
-from app.pipeline.pitch_correct import auto_pitch_correct
-import soundfile as sf
-audio, sr = sf.read('{}')
-corrected = auto_pitch_correct(audio, sr, key='{}', scale='{}', strength={})
-sf.write('{}', corrected, sr)
-""".format(KORE_DIR, vocal_path, params.get("pitch_key", "C"), params.get("pitch_scale", "major"), params.get("pitch_strength", 0.7), corrected_path)]
-            logger.info("Running pitch correction in isolated process...")
-            pc_result = subprocess.run(pc_args, cwd=str(KORE_DIR), capture_output=True, text=True, timeout=60)
-            if pc_result.returncode == 0 and corrected_path.exists():
-                logger.info("Pitch correction OK, using corrected vocal")
-                vocal_path = str(corrected_path)
-            else:
-                logger.warning(f"Pitch correction failed: {pc_result.stderr[-200:]}, using uncorrected")
-
-        logger.info(f"Running kore CLI: {args[0]} {args[1]} {' '.join(args[2:6])}...")
-        for k, v in params.items():
-            if v is not None and not k.startswith("pitch"):
-                kebab = k.replace("_", "-")
-                if isinstance(v, bool):
-                    if v:
-                        args.append(f"--{kebab}")
-                else:
-                    args.extend([f"--{kebab}", str(v)])
-
-        result = subprocess.run(args, cwd=str(KORE_DIR), capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            logger.error(f"Kore failed (code {result.returncode}): {result.stderr[-500:]}")
-            return {"error": result.stderr or result.stdout, "code": result.returncode}, 500
-        logger.info(f"Kore done, output: {out_path.stat().st_size if out_path.exists() else 'MISSING'} bytes")
         if not out_path.exists():
             logger.error("Output not created!")
             return {"error": "Output not created"}, 500
 
-        logger.info("Converting to 16-bit...")
-        subprocess.run(["ffmpeg", "-y", "-i", str(out_path), "-acodec", "pcm_s16le", "-ar", "48000", str(conv_path)], capture_output=True, timeout=60)
-        final_path = conv_path if conv_path.exists() else out_path
-        logger.info(f"Final output: {final_path.stat().st_size} bytes")
-        return FileResponse(str(final_path), media_type="audio/wav", filename="kore_output.wav")
+        logger.info(f"Output: {out_path.stat().st_size} bytes, converting to 16-bit...")
+        data, sr = sf.read(str(out_path), dtype='float32')
+        sf.write(str(conv_path), data, int(sr), subtype="PCM_16")
+
+        logger.info(f"Final output: {conv_path.stat().st_size} bytes")
+        return FileResponse(str(conv_path), media_type="audio/wav", filename="kore_output.wav")
 
     except Exception as e:
         logger.exception("Unexpected error")
@@ -172,6 +210,7 @@ sf.write('{}', corrected, sr)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8765)
